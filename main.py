@@ -53,7 +53,7 @@ ROLL_SPAN = 60   # EW rolling span for z-scores
 MIN_PERIODS = 5 # minimum periods before z-scores start being meaningful
 TODAY = date.today()
 
-SMART_MONEY_URL = "https://api.nansen.ai/api/beta/smart-money/inflows"
+SMART_MONEY_URL = "https://api.nansen.ai/api/betaUpdated main.py/smart-money/inflows"
 FLOW_INTEL_URL = "https://api.nansen.ai/api/beta/tgm/flow-intelligence"
 KRAKEN_OHLC_URL = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIR}&interval=1440"
 
@@ -116,114 +116,68 @@ WETH_ADDR = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".lower()
 
 def fetch_smart_money_inflows_eth() -> pd.DataFrame:
     """
-    Multi-chain Smart Money inflows (no pagination).
-
-    - Chains from NANSEN_CHAINS env or a safe EVM default list
-    - Aggregate ETH activity by:
+    Multi-page Smart Money inflows with proper pagination.
+    
+    Based on Nansen API documentation: https://docs.nansen.ai/api/smart-money
+    - Uses proper pagination structure to get all ETH tokens across multiple pages
+    - ETH tokens are found on pages 2-3, not just page 1
+    - Aggregates ETH activity by:
         * L1 (ethereum): tokenAddress in ETH_ADDR_BASKET
         * All chains: exact symbol match in ETH/LST symbol basket
-    - Debug logs:
-        * First 10 preview (symbol, tokenAddress, volume7dUSD)
-        * ETH match summary across all rows
     """
     import os
 
-    # 1) Chains
-    chains_env = os.getenv("NANSEN_CHAINS", "").strip()
-    if chains_env:
-        CHAINS = [c.strip() for c in chains_env.split(",") if c.strip()]
-    else:
-        # Conservative list of major chains more likely to be supported
-        CHAINS = [
-            "ethereum", "arbitrum", "base", "optimism", "polygon"
-        ]
-
-    # 2) Major ETH/LST symbols (exact, case-insensitive)
+    # ETH/LST symbols (exact, case-insensitive)
     ETH_SYMBOL_BASKET = {
         "ETH", "WETH",
-        "STETH", "WSTETH",
+        "STETH", "WSTETH", 
         "RETH", "CBETH",
         "FRXETH", "SFRXETH",
         "EETH", "WEETH",
         "OSETH", "SWETH",
     }
 
-    # Try multiple parameter combinations to get ETH tokens
-    payloads_to_try = [
-        # Start with the approach that successfully found ETH tokens
-        {
-            "name": "ethereum_only_broad",
-            "payload": {
-                "parameters": {
-                    "smFilter": ["Smart Trader"],  # More inclusive
-                    "chains": ["ethereum"],
-                    "includeStablecoin": False,
-                    "includeNativeTokens": True,
-                    "excludeSmFilter": [],
-                    "limit": 100,
-                }
-            }
+    # Use proper pagination structure from Nansen API docs
+    base_payload = {
+        "parameters": {
+            "smFilter": ["180D Smart Trader", "Fund", "Smart Trader"],
+            "chains": ["ethereum"],
+            "includeStablecoin": False,
+            "includeNativeTokens": True,
+            "excludeSmFilter": []
         },
-        # Then try multi-chain with same broad filter
-        {
-            "name": "multichain_broad",
-            "payload": {
-                "parameters": {
-                    "smFilter": ["Smart Trader"],  # More inclusive
-                    "chains": CHAINS,
-                    "includeStablecoin": False,
-                    "includeNativeTokens": True,
-                    "excludeSmFilter": [],
-                    "limit": 100,
-                }
-            }
-        },
-        # Original payload as fallback
-        {
-            "name": "original",
-            "payload": {
-                "parameters": {
-                    "smFilter": ["180D Smart Trader", "Fund", "Smart Trader"],
-                    "chains": CHAINS,
-                    "includeStablecoin": True,
-                    "includeNativeTokens": True,
-                    "excludeSmFilter": [],
-                    "limit": 100,
-                }
-            }
-        },
-        # Try with specific timeframe
-        {
-            "name": "with_timeframe",
-            "payload": {
-                "parameters": {
-                    "smFilter": ["180D Smart Trader", "Fund", "Smart Trader"],
-                    "chains": ["ethereum"],
-                    "includeStablecoin": False,
-                    "includeNativeTokens": True,
-                    "excludeSmFilter": [],
-                    "timeframe": "7d",
-                    "limit": 100,
-                }
-            }
+        "pagination": {
+            "page": 1,
+            "recordsPerPage": 100
         }
-    ]
+    }
 
-    best_result = None
-    best_eth_count = 0
+    all_data = []
+    all_eth_tokens = []
+    max_pages = 5  # Check first 5 pages to capture all ETH tokens
 
-    for attempt in payloads_to_try:
-        log(f"Trying Smart Money request: {attempt['name']}")
+    log(f"Fetching Smart Money data with pagination (max {max_pages} pages)...")
+
+    for page in range(1, max_pages + 1):
+        # Update page number
+        payload = base_payload.copy()
+        payload["pagination"]["page"] = page
         
         try:
-            r = requests.post(SMART_MONEY_URL, headers=HEADERS, json=attempt["payload"], timeout=30)
+            log(f"  Page {page}...")
+            r = requests.post(SMART_MONEY_URL, headers=HEADERS, json=payload, timeout=30)
             r.raise_for_status()
             
-            js = r.json()
-            data = js if isinstance(js, list) else js.get("data", [])
+            data = r.json()
+            if not data:  # Empty page, we've reached the end
+                log(f"  Page {page}: Empty, stopping pagination")
+                break
+                
+            log(f"  Page {page}: {len(data)} tokens")
+            all_data.extend(data)
             
-            # Count ETH-related tokens in this response
-            eth_tokens_found = []
+            # Look for ETH tokens on this page
+            page_eth_tokens = []
             for d in data:
                 ch = (d.get("chain") or "").lower()
                 addr = (d.get("tokenAddress") or "").lower()
@@ -233,117 +187,77 @@ def fetch_smart_money_inflows_eth() -> pd.DataFrame:
                 is_eth_symbol = (sym in ETH_SYMBOL_BASKET)
                 
                 if is_l1_eth_addr or is_eth_symbol:
-                    eth_tokens_found.append({
+                    eth_token = {
                         "symbol": sym,
                         "address": addr,
-                        "vol7d": d.get("volume7dUSD"),
                         "vol24h": d.get("volume24hUSD"),
+                        "vol7d": d.get("volume7dUSD"),
                         "vol30d": d.get("volume30dUSD"),
-                    })
+                        "page": page,
+                        "matched_by": "address" if is_l1_eth_addr else "symbol"
+                    }
+                    page_eth_tokens.append(eth_token)
+                    all_eth_tokens.append(d)  # Keep original data for aggregation
             
-            log(f"  - Found {len(eth_tokens_found)} ETH tokens, {len(data)} total tokens")
+            if page_eth_tokens:
+                log(f"  Page {page}: Found {len(page_eth_tokens)} ETH tokens:")
+                for token in page_eth_tokens:
+                    vol7d = token["vol7d"] or 0
+                    vol30d = token["vol30d"] or 0
+                    log(f"    {token['symbol']:8s} | 7d: {vol7d:>10,.0f} | 30d: {vol30d:>10,.0f}")
             
-            if len(eth_tokens_found) > best_eth_count:
-                best_eth_count = len(eth_tokens_found)
-                best_result = (attempt["name"], data, eth_tokens_found)
-                
         except Exception as e:
-            log(f"  - Failed: {e}")
-    
-    if best_result:
-        attempt_name, data, eth_tokens = best_result
-        log(f"Best result from '{attempt_name}' with {len(eth_tokens)} ETH tokens:")
-        log(json.dumps(eth_tokens, indent=2))
-        # Use the best result for further processing
-    else:
-        log("No successful Smart Money requests found ETH tokens, using original attempt...")
-        # Fall back to original logic - try the original payload one more time
-        try:
-            r = requests.post(SMART_MONEY_URL, headers=HEADERS, json=payloads_to_try[0]["payload"], timeout=30)
-            r.raise_for_status()
-            js = r.json()
-            data = js if isinstance(js, list) else js.get("data", [])
-        except Exception as e:
-            log(f"Smart Money inflows error: {e}")
-            raise
+            log(f"  Page {page}: Failed - {e}")
+            # Don't break, try next page
+            continue
 
-    # Continue with the data processing using the selected data
-    
-    # Validate data format
-    if not isinstance(data, list):
-        log("WARN: Unexpected JSON for smart-money/inflows; dumping:")
-        try:
-            log(json.dumps(data, indent=2))
-        except Exception:
-            log(str(data))
-        data = []
+    log(f"Pagination complete. Total tokens: {len(all_data)}, ETH tokens: {len(all_eth_tokens)}")
 
-    # --- DEBUG: first 10 preview ---
-    try:
-        preview = [
-            {
-                "symbol": (d.get("symbol") or d.get("tokenSymbol")),
-                "tokenAddress": d.get("tokenAddress"),
-                "vol7d": d.get("volume7dUSD"),
-                "chain": d.get("chain"),
-            }
-            for d in data[:20]  # Show first 20 instead of 10
-        ]
-        log("SM inflows (first 20):\n" + json.dumps(preview, indent=2))
-    except Exception as e:
-        log(f"DEBUG preview failed: {e}")
-    # --- END DEBUG ---
-
-    # 3) Aggregate matches (L1 address basket + all-chain exact symbol basket)
+    # Aggregate ETH token volumes across all pages
     vol24 = vol7 = vol30 = 0.0
     matches = []
-    all_symbols_seen = set()
-    all_chains_seen = set()
+    dedupe_addresses = set()  # Avoid double-counting same token on multiple pages
     
-    for d in data:
-        ch   = (d.get("chain") or "").lower()
+    for d in all_eth_tokens:
+        ch = (d.get("chain") or "").lower()
         addr = (d.get("tokenAddress") or "").lower()
-        sym  = (d.get("symbol") or d.get("tokenSymbol") or "").replace("🌱", "").strip().upper()
+        sym = (d.get("symbol") or d.get("tokenSymbol") or "").replace("🌱", "").strip().upper()
         
-        all_symbols_seen.add(sym)
-        all_chains_seen.add(ch)
-
-        is_l1_eth_addr = (ch == "ethereum" and addr in ETH_ADDR_BASKET)
-        is_eth_symbol  = (sym in ETH_SYMBOL_BASKET)
-
-        if is_l1_eth_addr or is_eth_symbol:
-            matches.append({
-                "chain": ch,
-                "symbol": (d.get("symbol") or d.get("tokenSymbol")),
-                "tokenAddress": d.get("tokenAddress"),
-                "vol24h": d.get("volume24hUSD"),
-                "vol7d": d.get("volume7dUSD"),
-                "vol30d": d.get("volume30dUSD"),
-                "matched_by": "address" if is_l1_eth_addr else "symbol"
-            })
-            try:
-                vol24 += float(d.get("volume24hUSD") or 0)
-                vol7  += float(d.get("volume7dUSD")  or 0)
-                vol30 += float(d.get("volume30dUSD") or 0)
-            except Exception:
-                pass
-
-    # --- DEBUG: comprehensive analysis ---
-    try:
-        log(f"Total tokens processed: {len(data)}")
-        log(f"All chains seen: {sorted(all_chains_seen)}")
-        log(f"ETH-related symbols we're looking for: {ETH_SYMBOL_BASKET}")
+        # Dedupe by address to avoid counting same token multiple times
+        if addr in dedupe_addresses:
+            continue
+        dedupe_addresses.add(addr)
         
-        # Look for any symbols that contain "ETH"
-        eth_like_symbols = [s for s in all_symbols_seen if "ETH" in s]
-        log(f"Symbols containing 'ETH' found in API response: {sorted(eth_like_symbols)}")
+        matches.append({
+            "chain": ch,
+            "symbol": sym,
+            "tokenAddress": d.get("tokenAddress"),
+            "vol24h": d.get("volume24hUSD"),
+            "vol7d": d.get("volume7dUSD"),
+            "vol30d": d.get("volume30dUSD"),
+            "matched_by": "address" if (ch == "ethereum" and addr in ETH_ADDR_BASKET) else "symbol"
+        })
         
-        log(f"SM inflows — ETH basket (multi-chain) matches (count={len(matches)}):")
-        log(json.dumps(matches[:10], indent=2))
-        log(f"ETH totals (multi-chain): 24h={vol24:.2f}  7d={vol7:.2f}  30d={vol30:.2f}")
-    except Exception as e:
-        log(f"DEBUG basket summary failed: {e}")
-    # --- END DEBUG ---
+        try:
+            vol24 += float(d.get("volume24hUSD") or 0)
+            vol7 += float(d.get("volume7dUSD") or 0)
+            vol30 += float(d.get("volume30dUSD") or 0)
+        except Exception:
+            pass
+
+    # Debug output
+    log(f"ETH Smart Money aggregation:")
+    log(f"  Unique ETH tokens found: {len(matches)}")
+    log(f"  24h volume: ${vol24:,.0f}")
+    log(f"  7d volume:  ${vol7:,.0f}")
+    log(f"  30d volume: ${vol30:,.0f}")
+    
+    if matches:
+        log("ETH tokens breakdown:")
+        for match in matches:
+            vol7d = match["vol7d"] or 0
+            vol30d = match["vol30d"] or 0
+            log(f"  {match['symbol']:8s} | 7d: {vol7d:>12,.0f} | 30d: {vol30d:>12,.0f}")
 
     return pd.DataFrame([{
         "ts": TODAY,
