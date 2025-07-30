@@ -53,7 +53,7 @@ ROLL_SPAN = 60   # EW rolling span for z-scores
 MIN_PERIODS = 5 # minimum periods before z-scores start being meaningful
 TODAY = date.today()
 
-SMART_MONEY_URL = "https://api.nansen.ai/api/betaUpdated main.py/smart-money/inflows"
+SMART_MONEY_URL = "https://api.nansen.ai/api/beta/smart-money/inflows"
 FLOW_INTEL_URL = "https://api.nansen.ai/api/beta/tgm/flow-intelligence"
 KRAKEN_OHLC_URL = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIR}&interval=1440"
 
