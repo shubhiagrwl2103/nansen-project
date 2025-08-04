@@ -468,15 +468,89 @@ def main():
             except Exception:
                 return str(x)
 
+        # Create intuitive message about smart money activity
+        def interpret_smart_money_activity(vol_7d, vol_30d, z_7d, z_30d, signal, px_ret_7d, exchange_flow):
+            # Determine what smart money is doing
+            if vol_7d > 0:
+                recent_activity = "🟢 BUYING ETH"
+            elif vol_7d < 0:
+                recent_activity = "🔴 SELLING ETH"
+            else:
+                recent_activity = "⚪ No recent activity"
+            
+            if vol_30d > 0:
+                monthly_activity = "🟢 NET BUYERS"
+            elif vol_30d < 0:
+                monthly_activity = "🔴 NET SELLERS"
+            else:
+                monthly_activity = "⚪ Neutral"
+            
+            # Interpret activity levels
+            if abs(z_7d) > 2:
+                recent_level = "🔥 EXTREME"
+            elif abs(z_7d) > 1.5:
+                recent_level = "📈 VERY HIGH"
+            elif abs(z_7d) > 0.5:
+                recent_level = "↗️ Above normal"
+            elif abs(z_7d) > -0.5:
+                recent_level = "➖ Normal"
+            else:
+                recent_level = "📉 Below normal"
+            
+            if abs(z_30d) > 2:
+                monthly_level = "🔥 EXTREME"
+            elif abs(z_30d) > 1.5:
+                monthly_level = "📈 VERY HIGH"
+            elif abs(z_30d) > 0.5:
+                monthly_level = "↗️ Above normal"
+            elif abs(z_30d) > -0.5:
+                monthly_level = "➖ Normal"
+            else:
+                monthly_level = "📉 Below normal"
+            
+            # Signal explanation
+            if signal.upper() == "LONG":
+                signal_reason = "💰 Smart money accumulating + price weakness = BUY opportunity"
+            elif signal.upper() == "FLAT":
+                signal_reason = "🚪 Smart money selling = EXIT signal"
+            else:
+                signal_reason = "⏸️ Mixed signals or normal activity = WAIT"
+            
+            # Exchange flow interpretation
+            if exchange_flow and exchange_flow < -10000000:  # -10M+
+                flow_interpret = "💎 Large ETH outflow from exchanges (bullish)"
+            elif exchange_flow and exchange_flow > 10000000:  # +10M+
+                flow_interpret = "🏦 Large ETH inflow to exchanges (bearish)"
+            else:
+                flow_interpret = "🔄 Normal exchange flows"
+            
+            return recent_activity, monthly_activity, recent_level, monthly_level, signal_reason, flow_interpret
+
+        # Get interpretations
+        vol_7d = r.get('volume7dUSD', 0)
+        vol_30d = r.get('volume30dUSD', 0)
+        z_7d = r.get('sm_7d_z', 0)
+        z_30d = r.get('sm_30d_z', 0)
+        signal = r.get('signal', 'hold')
+        px_ret_7d = r.get('px_ret_7d', 0)
+        exchange_flow = r.get('exchange_flow_usd', 0)
+        
+        recent_activity, monthly_activity, recent_level, monthly_level, signal_reason, flow_interpret = \
+            interpret_smart_money_activity(vol_7d, vol_30d, z_7d, z_30d, signal, px_ret_7d, exchange_flow)
+
         msg = (
-            f"*ETH Smart Money Signal — {r.get('ts')}*\n"
-            f"Signal: *{r.get('signal', 'NA').upper()}*\n"
-            f"Price: {fmt(r.get('price_usd'), '${:,.2f}')}\n"
-            f"SM 7d z-score: {fmt(r.get('sm_7d_z'), '{:.2f}')}\n"
-            f"SM 30d z-score: {fmt(r.get('sm_30d_z'), '{:.2f}')}\n"
-            f"7d px return: {fmt(r.get('px_ret_7d'), '{:.2%}')}\n"
-            f"Net flow to exchanges (USD): {r.get('exchange_flow_usd')}\n"
-            f"Divergence 7d: {fmt(r.get('divergence_7d'), '{:.2f}')}"
+            f"*🧠 ETH Smart Money Update — {r.get('ts')}*\n"
+            f"\n*📊 SIGNAL: {signal.upper()}*\n"
+            f"{signal_reason}\n"
+            f"\n*💰 Smart Money Activity:*\n"
+            f"7d: {recent_activity} ({recent_level})\n"
+            f"30d: {monthly_activity} ({monthly_level})\n"
+            f"30d Volume: {fmt(vol_30d, '${:,.0f}')}\n"
+            f"\n*📈 Market Context:*\n"
+            f"ETH Price: {fmt(r.get('price_usd'), '${:,.2f}')}\n"
+            f"7d Return: {fmt(px_ret_7d, '{:.2%}')}\n"
+            f"{flow_interpret}\n"
+            f"\n_Smart money = top 5,000 highest-performing wallets_"
         )
         send_telegram(msg)
         log("Done.")
